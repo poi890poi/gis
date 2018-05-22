@@ -7,7 +7,7 @@ Python Scripts for GIS
 - scikit-image
 - pillow
 
-# Finding ridges and valleys
+# Finding Ridges and Valleys with DEM
 1. Perform Sobel convolution on DEM to prepare slope maps (vertical and horizontal separately)
 2. Generate points that follow slope up or down on the DEM (random or evenly distributed?)
 3. Aggregate traces of the crawling points in a new map
