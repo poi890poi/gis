@@ -1,11 +1,14 @@
 import gdal
 import numpy as np
 from scipy import signal
-from scipy.misc import imresize, imsave
+from skimage.transform import resize as imresize
+from scipy.misc import imsave
+from shared import normalize
 
 import sys
 import os.path
 from shutil import copyfile
+from tempfile import mkdtemp
 
 class ConvKernels:
     identity = np.array([[ 0.0, 0.0, 0.0],
@@ -31,38 +34,37 @@ class ConvKernels:
                         [  4.0,  8.0,  0.0, -8.0, -4.0],
                         [  1.0,  2.0,  0.0, -2.0, -1.0]])
     sobelv5 = np.array([[  1.0,  4.0,  6.0,  4.0,  1.0],
-                      [  2.0,  8.0, 12.0,  8.0,  2.0],
-                      [  0.0,  0.0,  0.0,  0.0,  0.0],
-                      [ -2.0, -8.0,-12.0, -8.0, -2.0],
-                      [ -1.0, -4.0, -6.0, -4.0, -1.0]])
+                        [  2.0,  8.0, 12.0,  8.0,  2.0],
+                        [  0.0,  0.0,  0.0,  0.0,  0.0],
+                        [ -2.0, -8.0,-12.0, -8.0, -2.0],
+                        [ -1.0, -4.0, -6.0, -4.0, -1.0]])
 
-def process_save(source_array, kernel, source, destination, band):
+def process_save(source_array, kernel, source, prefix, band):
     try:
-        preview = destination + '.png'
-        destination = destination + '.tif'
+        fn_full = prefix + '.dat'
+        fn_small = prefix + ''
+        fn_preview = prefix + '.png'
 
         height, width, *_ = source_array.shape
         resize_target = [1920, 1920]
         resize_rate = min(resize_target[0]/height, resize_target[1]/width)
         resize_target = (np.array([height, width], dtype=np.float)*resize_rate).astype(dtype=np.int)
-        print(height, width, resize_target)
+        print('Convolving...', height, width)
 
-        # convolve
-        convolved = signal.convolve2d(source_array, kernel, mode='same').astype(np.int16)
+        # Convolve
+        convolved = np.memmap(fn_full, dtype=np.float, mode='w+', shape=source_array.shape)
+        convolved[:] = normalize(signal.convolve2d(source_array, kernel, mode='same'))
+        convolved.flush()
+        print('Convolved data saved', fn_full, sys.getsizeof(convolved))
         
-        imsave(preview, imresize(convolved, (resize_target[0], resize_target[1])))
-        print('Convolved DEM saved for preview', preview)
-
-        # save convolved raster
-        if not os.path.isfile(destination):
-            copyfile(source, destination)            
-
-        out_raster = gdal.Open(destination, gdal.GA_Update)
-        out_band = out_raster.GetRasterBand(band)
-        out_band.WriteArray(convolved, 0, 0)
-        out_band.FlushCache()
-        out_raster = None
-        print('Convolved DEM saved', destination)
+        # Save normalized small PNG for preview.
+        # Normalize is required after resizing because of resampling.
+        resized = normalize(imresize(convolved, (resize_target[0], resize_target[1])))
+        np.save(fn_small, resized)
+        preview = (resized*255.).astype(np.uint8)
+        print(np.amin(resized), np.amax(resized), np.amin(preview), np.amax(preview))
+        imsave(fn_preview, preview)
+        print('Preview saved', fn_preview, resize_target)
 
     except:
         raise
@@ -77,20 +79,24 @@ xsize = dem.RasterXSize
 ysize = dem.RasterYSize
 bands = dem.RasterCount
 
-print(xsize, ysize, bands)
-
 for i in range(1, bands + 1):
-    print("processing band " + str(i) + " of " + str(bands))
+    print()
+    print('Processing band {} of {}'.format(i, bands))
     band_i = dem.GetRasterBand(i)
 
-    raster = band_i.ReadAsArray().astype(np.float)
-    print("convolving band " + str(i) + " of " + str(bands))
+    raster = np.memmap(os.path.join(mkdtemp(), 'working_dem.dat'), dtype=np.float, mode='w+', shape=(ysize, xsize))
+    raster[:] = band_i.ReadAsArray()
 
+    print('Raster loaded', ysize, xsize, sys.getsizeof(raster))
+
+    # Kernel size of 3x3 is choosen because in 30m DEM it spans 90m and is already too rough for hiking
     process_save(raster, ConvKernels.prom, source, os.path.join(working_dir, 'prom'), i)
-    process_save(raster, ConvKernels.prom5, source, os.path.join(working_dir, 'prom5'), i)
+    #process_save(raster, ConvKernels.prom5, source, os.path.join(working_dir, 'prom5'), i)
     process_save(raster, ConvKernels.sobelh, source, os.path.join(working_dir, 'sobelh'), i)
     process_save(raster, ConvKernels.sobelv, source, os.path.join(working_dir, 'sobelv'), i)
-    process_save(raster, ConvKernels.sobelh5, source, os.path.join(working_dir, 'sobelh5'), i)
-    process_save(raster, ConvKernels.sobelv5, source, os.path.join(working_dir, 'sobelv5'), i)
+    #process_save(raster, ConvKernels.sobelh5, source, os.path.join(working_dir, 'sobelh5'), i)
+    #process_save(raster, ConvKernels.sobelv5, source, os.path.join(working_dir, 'sobelv5'), i)
+
+print()
 
 dem = None
