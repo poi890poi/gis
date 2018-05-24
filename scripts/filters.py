@@ -59,15 +59,17 @@ def process_save(source_array, kernel, source, prefix, band):
         # Convolve
         convolved = np.memmap(fn_full, dtype=np.float, mode='w+', shape=source_array.shape)
         kernel_combined = signal.convolve2d(kernel, ConvKernels.gaussian, mode='full')
-        convolved[:] = normalize(signal.convolve2d(source_array, kernel_combined, mode='same'))
+        convolved[:] = signal.convolve2d(source_array, kernel_combined, mode='same')
         convolved.flush()
         print('Convolved data saved', fn_full, sys.getsizeof(convolved))
         
-        # Save normalized small PNG for preview.
-        # Normalize is required after resizing because of resampling.
-        resized = normalize(imresize(convolved, (resize_target[0], resize_target[1])))
+        # Save resized array for proof of concept
+        # Do not normalize here; vector length normalization should be applied instead
+        resized = imresize(convolved, (resize_target[0], resize_target[1]))
         np.save(fn_small, resized)
-        preview = (resized*255.).astype(np.uint8)
+
+        # Save preview PNG
+        preview = (normalize(resized)*255.).astype(np.uint8)
         print(np.amin(resized), np.amax(resized), np.amin(preview), np.amax(preview))
         imsave(fn_preview, preview)
         print('Preview saved', fn_preview, resize_target)
