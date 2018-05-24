@@ -14,6 +14,9 @@ class ConvKernels:
     identity = np.array([[ 0.0, 0.0, 0.0],
                          [ 0.0, 1.0, 0.0],
                          [ 0.0, 0.0, 0.0]])
+    gaussian = np.array([[ 1.0, 2.0, 1.0],
+                         [ 2.0, 4.0, 2.0],
+                         [ 1.0, 2.0, 1.0]])
     prom = np.array([[ -1.0, -2.0, -1.0],
                      [ -2.0, 12.0, -2.0],
                      [ -1.0, -2.0, -1.0]])
@@ -45,15 +48,18 @@ def process_save(source_array, kernel, source, prefix, band):
         fn_small = prefix + ''
         fn_preview = prefix + '.png'
 
+        # Calculate fixed-aspect resizing for preview
         height, width, *_ = source_array.shape
-        resize_target = [1920, 1920]
+        resize_target = [4000, 4000]
         resize_rate = min(resize_target[0]/height, resize_target[1]/width)
         resize_target = (np.array([height, width], dtype=np.float)*resize_rate).astype(dtype=np.int)
+
         print('Convolving...', height, width)
 
         # Convolve
         convolved = np.memmap(fn_full, dtype=np.float, mode='w+', shape=source_array.shape)
-        convolved[:] = normalize(signal.convolve2d(source_array, kernel, mode='same'))
+        kernel_combined = signal.convolve2d(kernel, ConvKernels.gaussian, mode='full')
+        convolved[:] = normalize(signal.convolve2d(source_array, kernel_combined, mode='same'))
         convolved.flush()
         print('Convolved data saved', fn_full, sys.getsizeof(convolved))
         
