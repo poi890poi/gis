@@ -42,6 +42,20 @@ class ConvKernels:
                         [ -2.0, -8.0,-12.0, -8.0, -2.0],
                         [ -1.0, -4.0, -6.0, -4.0, -1.0]])
 
+def save_preview(path, source_array, target_shape=[4000, 4000]):
+    height, width, *_ = source_array.shape
+
+    resize_rate = min(target_shape[0]/height, target_shape[1]/width)
+    target_shape = (np.array([height, width], dtype=np.float)*resize_rate).astype(dtype=np.int)
+
+    resized = imresize(source_array, (target_shape[0], target_shape[1]))
+    np.save('', resized)
+
+    # Save preview PNG
+    preview = (normalize(resized)*255.).astype(np.uint8)
+    imsave(path, preview)
+    print('Preview saved', path, target_shape)
+
 def process_save(source_array, kernel, source, prefix, band):
     try:
         fn_full = prefix + '.dat'
@@ -100,11 +114,31 @@ for i in range(1, bands + 1):
     # Kernel size of 3x3 is choosen because in 30m DEM it spans 90m and is already too rough for hiking
     process_save(raster, ConvKernels.prom, source, os.path.join(working_dir, 'prom'), i)
     #process_save(raster, ConvKernels.prom5, source, os.path.join(working_dir, 'prom5'), i)
-    process_save(raster, ConvKernels.sobelh, source, os.path.join(working_dir, 'sobelh'), i)
     process_save(raster, ConvKernels.sobelv, source, os.path.join(working_dir, 'sobelv'), i)
-    #process_save(raster, ConvKernels.sobelh5, source, os.path.join(working_dir, 'sobelh5'), i)
+    process_save(raster, ConvKernels.sobelh, source, os.path.join(working_dir, 'sobelh'), i)
     #process_save(raster, ConvKernels.sobelv5, source, os.path.join(working_dir, 'sobelv5'), i)
-
-print()
+    #process_save(raster, ConvKernels.sobelh5, source, os.path.join(working_dir, 'sobelh5'), i)
 
 dem = None
+
+# Prepare vector length map and normalize sobel
+sobelv = np.load(os.path.join(working_dir, 'sobelv.npy'), mmap_mode='r+')
+sobelh = np.load(os.path.join(working_dir, 'sobelh.npy'), mmap_mode='r+')
+
+d_map = np.memmap(os.path.join(working_dir, 'vlen.npy'), dtype=np.float, mode='w+', shape=sobelv.shape)
+d_map[:] = np.sqrt(sobelv*sobelv + sobelh*sobelh)
+
+# Save vector length as preview PNG
+d_preview = imresize(d_map, d_map.shape)
+d_preview[:] = normalize(d_preview)
+fn_preview = os.path.join(working_dir, 'vlen.png')
+imsave(fn_preview, (d_preview*255).astype(np.uint8))
+
+# Normalize vectors (keep direction and discard length)
+d_map[d_map==0] = 1.
+sobelv /= d_map
+sobelh /= d_map
+sobelv.flush()
+sobelh.flush()
+
+print()
