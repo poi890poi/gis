@@ -24,3 +24,4 @@ Python Scripts for GIS
 - Use tensorflow.image.resize_images to downsample numpy.memmap arrays
 - Early stop crawling if the climber is lingering -> What algorithm detects lingering fast?
 - Change slope vector to uint16 and use Bresenham's algorithm for calculating new coordinate of climbers
+- Replace float array with integer whenever possible
