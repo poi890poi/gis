@@ -25,3 +25,13 @@ Python Scripts for GIS
 - Early stop crawling if the climber is lingering -> What algorithm detects lingering fast?
 - Change slope vector to uint16 and use Bresenham's algorithm for calculating new coordinate of climbers
 - Replace float array with integer whenever possible
+
+memmap benchamrk
+Assigning uint16 array: 0.01600337028503418
+Adding uint16 array: 0.008001565933227539
+Multiplying uint16 array: 0.010001897811889648
+Resizing uint16 array: 32.55651021003723
+Assigning flaot16 array: 0.013002395629882812
+Adding flaot16 array: 0.20104002952575684
+Multiplying flaot16 array: 0.1930387020111084
+Resizing flaot16 array: 73.62072110176086
