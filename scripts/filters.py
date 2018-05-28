@@ -1,14 +1,16 @@
 import gdal
 import numpy as np
+import tensorflow as tf
 from scipy import signal
 from skimage.transform import resize as imresize
 from scipy.misc import imsave
-from shared import normalize
+from shared import normalize, normalize_symm
+from skimage import exposure
 
 import sys
 import os.path
 from shutil import copyfile
-from tempfile import mkdtemp
+from tempfile import mkdtemp, gettempdir
 
 class ConvKernels:
     identity = np.array([[ 0.0, 0.0, 0.0],
@@ -43,53 +45,42 @@ class ConvKernels:
                         [ -1.0, -4.0, -6.0, -4.0, -1.0]])
 
 def save_preview(path, source_array, target_shape=[4000, 4000]):
+    # Calculate fixed-aspect resizing for preview
     height, width, *_ = source_array.shape
 
     resize_rate = min(target_shape[0]/height, target_shape[1]/width)
     target_shape = (np.array([height, width], dtype=np.float)*resize_rate).astype(dtype=np.int)
 
-    resized = imresize(source_array, (target_shape[0], target_shape[1]))
-    np.save('', resized)
+    resize = np.memmap(os.path.join(gettempdir(), 'resizing.dat'), dtype=source_array.dtype, mode='w+', shape=source_array.shape)
+    resize[:] = source_array
+    resize = imresize(resize, target_shape)
 
     # Save preview PNG
-    preview = (normalize(resized)*255.).astype(np.uint8)
-    imsave(path, preview)
+    preview = (normalize(resize)*255.).astype(np.uint8)
+    imsave(path, exposure.equalize_adapthist(preview))
     print('Preview saved', path, target_shape)
 
 def process_save(source_array, kernel, source, prefix, band):
     try:
         fn_full = prefix + '.dat'
         fn_small = prefix + ''
-        fn_preview = prefix + '.png'
-
-        # Calculate fixed-aspect resizing for preview
-        height, width, *_ = source_array.shape
-        resize_target = [4000, 4000]
-        resize_rate = min(resize_target[0]/height, resize_target[1]/width)
-        resize_target = (np.array([height, width], dtype=np.float)*resize_rate).astype(dtype=np.int)
-
-        print('Convolving...', height, width)
 
         # Convolve
+        tf_shape = (1,) + source_array.shape + (1,)
+        print('Convolving...', source_array.shape, tf_shape)
         convolved = np.memmap(fn_full, dtype=np.float, mode='w+', shape=source_array.shape)
         kernel_combined = signal.convolve2d(kernel, ConvKernels.gaussian, mode='full')
         convolved[:] = signal.convolve2d(source_array, kernel_combined, mode='same')
         convolved.flush()
         print('Convolved data saved', fn_full, sys.getsizeof(convolved))
-        
-        # Save resized array for proof of concept
-        # Do not normalize here; vector length normalization should be applied instead
-        resized = imresize(convolved, (resize_target[0], resize_target[1]))
-        np.save(fn_small, resized)
 
-        # Save preview PNG
-        preview = (normalize(resized)*255.).astype(np.uint8)
-        print(np.amin(resized), np.amax(resized), np.amin(preview), np.amax(preview))
-        imsave(fn_preview, preview)
-        print('Preview saved', fn_preview, resize_target)
+        fn_preview = prefix + '.png'
+        save_preview(fn_preview, convolved)
 
     except:
         raise
+
+print(gettempdir())
 
 working_dir = '../../data'
 source = os.path.join(working_dir, './tif file/twdtm_asterV2_30m.tif')
@@ -106,7 +97,7 @@ for i in range(1, bands + 1):
     print('Processing band {} of {}'.format(i, bands))
     band_i = dem.GetRasterBand(i)
 
-    raster = np.memmap(os.path.join(mkdtemp(), 'working_dem.dat'), dtype=np.float, mode='w+', shape=(ysize, xsize))
+    raster = np.memmap(os.path.join(gettempdir(), 'working_dem.dat'), dtype=np.float, mode='w+', shape=(ysize, xsize))
     raster[:] = band_i.ReadAsArray()
 
     print('Raster loaded', ysize, xsize, sys.getsizeof(raster))
@@ -122,17 +113,16 @@ for i in range(1, bands + 1):
 dem = None
 
 # Prepare vector length map and normalize sobel
-sobelv = np.load(os.path.join(working_dir, 'sobelv.npy'), mmap_mode='r+')
-sobelh = np.load(os.path.join(working_dir, 'sobelh.npy'), mmap_mode='r+')
+#sobelv = np.memmap(fn_full, dtype=np.float, mode='w+', shape=(1,)+source_array.shape+(1,))
+sobelv = np.memmap(os.path.join(working_dir, 'sobelv.dat'), dtype=np.float, mode='r+', shape=(ysize, xsize))
+sobelh = np.memmap(os.path.join(working_dir, 'sobelh.dat'), dtype=np.float, mode='r+', shape=(ysize, xsize))
 
-d_map = np.memmap(os.path.join(working_dir, 'vlen.npy'), dtype=np.float, mode='w+', shape=sobelv.shape)
+d_map = np.memmap(os.path.join(working_dir, 'vlen.dat'), dtype=np.float, mode='w+', shape=sobelv.shape)
 d_map[:] = np.sqrt(sobelv*sobelv + sobelh*sobelh)
 
 # Save vector length as preview PNG
-d_preview = imresize(d_map, d_map.shape)
-d_preview[:] = normalize(d_preview)
 fn_preview = os.path.join(working_dir, 'vlen.png')
-imsave(fn_preview, (d_preview*255).astype(np.uint8))
+save_preview(fn_preview, d_map)
 
 # Normalize vectors (keep direction and discard length)
 d_map[d_map==0] = 1.
@@ -140,5 +130,10 @@ sobelv /= d_map
 sobelh /= d_map
 sobelv.flush()
 sobelh.flush()
+
+fn_preview = os.path.join(working_dir, 'sobelv-n.png')
+save_preview(fn_preview, sobelv)
+fn_preview = os.path.join(working_dir, 'sobelh-n.png')
+save_preview(fn_preview, sobelh)
 
 print()
