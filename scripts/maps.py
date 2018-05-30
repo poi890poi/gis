@@ -15,6 +15,7 @@ import uuid
 from shutil import copyfile
 import urllib.request
 import wget, patoolib
+import pickle
 
 class Config:
     TYPE_FLOAT = np.float32
@@ -96,13 +97,17 @@ class DiskMap(np.memmap):
         copy[:] = self.astype(dtype=dtype)[:]
         return copy
 
-    def slice_save_preview(self, outpath, roi):
+    def slice_normalize(self, roi):
         roi = [min(roi[0], roi[2]), min(roi[1], roi[3]), max(roi[0], roi[2]), max(roi[1], roi[3])]
         w_ = roi[2] - roi[0]
         h_ = roi[3] - roi[1]
         sliced = np.array(self[roi[1]:roi[1]+h_, roi[0]:roi[0]+w_]).astype(dtype=Config.TYPE_FLOAT)
-        normalized = (normalize(sliced)*255.).astype(np.uint8)
+        return (normalize(sliced)*255.).astype(np.uint8)
+
+    def slice_save_preview(self, outpath, roi):
+        normalized = self.slice_normalize(roi)
         imsave(outpath, exposure.rescale_intensity(normalized))
+        del normalized
         print('Sliced preview saved', outpath, roi)
 
     def resize_save_preview(self, outpath, target_shape=[4000, 4000]):
@@ -116,6 +121,7 @@ class DiskMap(np.memmap):
         resized = imresize(resized, target_shape)
         normalized = (normalize(resized)*255.).astype(np.uint8)
         imsave(outpath, exposure.rescale_intensity(normalized))
+        del normalized
         print('Resized preview saved', outpath, target_shape)
 
         DiskMap.remove_file(resized)
@@ -143,13 +149,13 @@ class DigitalElevationModel:
         self.dir, self.filename = path.split(inpath)
         root, ext = path.splitext(self.filename)
         self.raster_path = path.join(self.dir, root + '.npy')
-        self.dem = gdal.Open(inpath)
-        self.xsize = self.dem.RasterXSize
-        self.ysize = self.dem.RasterYSize
+        self.gdal_obj = gdal.Open(inpath)
+        self.xsize = self.gdal_obj.RasterXSize
+        self.ysize = self.gdal_obj.RasterYSize
         self.shape = (self.ysize, self.xsize)
-        self.bands = self.dem.RasterCount
-        self.projection = self.dem.GetProjection()
-        self.transform = self.dem.GetGeoTransform()
+        self.bands = self.gdal_obj.RasterCount
+        self.projection = self.gdal_obj.GetProjection()
+        self.transform = self.gdal_obj.GetGeoTransform()
         self.raster = None
         print('DEM object opened, ({}, {}, {}), transformation: {}'.format(self.xsize, self.ysize, self.bands, self.transform))
         if self.bands > 1: print('The DEM has more than 1 band and this script will process only the first one')
@@ -174,9 +180,22 @@ class DigitalElevationModel:
                 self.raster = DiskMap(self.raster_path, dtype=Config.TYPE_FLOAT, mode='r', shape=self.shape)
             else:
                 self.raster = DiskMap(self.raster_path, dtype=Config.TYPE_FLOAT, mode='w+', shape=self.shape)
-                self.raster[:] = self.dem.GetRasterBand(1).ReadAsArray()
+                self.raster[:] = self.gdal_obj.GetRasterBand(1).ReadAsArray()
         print('Raster loaded', np.amin(self.raster), np.amax(self.raster))
         return self.raster
+
+    def set_preview_roi(self, lt, rb):
+        lt = self.latlon_to_pixel((121., 25.))
+        rb = self.latlon_to_pixel((122., 24.))
+        self.preview_roi = [lt[0], lt[1], rb[0], rb[1]]
+
+    @staticmethod
+    def dump_meta(dem):
+        # Dump as pickle to for future use. Call this only when raster is no longer used.
+        del dem.gdal_obj
+        del dem.raster
+        with open(path.join(Config.BASE_DIR, 'dem.pkl'), 'wb') as fp:
+            pickle.dump(dem, fp)
 
 class MapsCreator:
     def __init__(self, source_url):
@@ -194,11 +213,6 @@ class MapsCreator:
 
         self.dem = DigitalElevationModel(self.source_dem)
         self.raster = self.dem.get_raster_create()
-
-    def set_preview_roi(self, lt, rb):
-        lt = self.dem.latlon_to_pixel((121., 25.))
-        rb = self.dem.latlon_to_pixel((122., 24.))
-        self.preview_roi = [lt[0], lt[1], rb[0], rb[1]]
 
     def copy_convolve(self, kernel, prefix, gaussian=True):
         # Convolve
@@ -218,7 +232,7 @@ class MapsCreator:
     def save_8bit_n_preview(self, source, prefix, signed=False, pre_normalized=False):
         npypath = path.join(Config.WORKING_DIR, prefix + '.npy')
         cast_ = source.save_8bit(npypath, signed, pre_normalized)
-        cast_.slice_save_preview(path.join(Config.PREVIEW_DIR, prefix + '.png'), self.preview_roi)
+        cast_.slice_save_preview(path.join(Config.PREVIEW_DIR, prefix + '.png'), self.dem.preview_roi)
         del cast_
 
     def prepare_maps(self):
@@ -272,8 +286,9 @@ if __name__ == "__main__":
 
     source = 'http://gis.rchss.sinica.edu.tw/gps/wp-content/uploads/2012/02/20120201_twdtm_asterV2_30m.rar'
     mc = MapsCreator(source)
-    mc.set_preview_roi((121., 25.), (122., 24.))
+    mc.dem.set_preview_roi((121., 25.), (122., 24.))
     mc.prepare_maps()
+    DigitalElevationModel.dump_meta(mc.dem)
     del mc
 
     print('All tasks done')

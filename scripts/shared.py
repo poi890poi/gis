@@ -11,7 +11,8 @@ def normalize(arr, signed=False):
         min_ = -max_
 
     print('Normalization... signed: {}, dtype: {}, shape: {}, min/max: ({}, {})'.format(signed, arr.dtype, arr.shape, min_, max_))
-        
+
     arr -= min_
-    arr /= (max_ - min_)
+    if max_ > min_:
+        arr /= (max_ - min_)
     return arr
