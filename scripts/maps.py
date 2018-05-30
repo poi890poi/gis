@@ -143,6 +143,13 @@ class DiskMap(np.memmap):
             DiskMap.remove_file(normalized_)
         return cast
 
+    def save_16bit(self, outpath, signed=False):
+        if signed:
+            cast = self.copy_astype(np.int16, outpath)
+        else:
+            cast = self.copy_astype(np.uint16, outpath)
+        return cast
+
 class DigitalElevationModel:
     def __init__(self, inpath):
         print('Opening DEM object...', inpath)
@@ -235,9 +242,15 @@ class MapsCreator:
         cast_.slice_save_preview(path.join(Config.PREVIEW_DIR, prefix + '.png'), self.dem.preview_roi)
         del cast_
 
+    def save_16bit(self, source, prefix, signed=False):
+        npypath = path.join(Config.WORKING_DIR, prefix + '.npy')
+        cast_ = source.save_16bit(npypath, signed)
+        cast_.slice_save_preview(path.join(Config.PREVIEW_DIR, prefix + '.png'), self.dem.preview_roi)
+        del cast_
+
     def prepare_maps(self):
         # Normalize elevation, convert to uint8, save preview
-        self.save_8bit_n_preview(self.raster, 'dem8')
+        self.save_16bit(self.raster, 'elevation')
 
         # Prepare prominence maps
         prominence = self.copy_convolve(ConvKernels.prom5, 'prominence')
