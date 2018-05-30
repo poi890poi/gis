@@ -1,16 +1,27 @@
 import gdal, osr
 import numpy as np
-import tensorflow as tf
 from scipy import signal
-from skimage.transform import resize as imresize
 from scipy.misc import imsave
-from shared import normalize, normalize_symm
+from skimage.transform import resize as imresize
 from skimage import exposure
 
+from shared import normalize
+
 import sys
-import os.path
+import os.path as path
+import os
+from os import makedirs
+import uuid
 from shutil import copyfile
-from tempfile import mkdtemp, gettempdir
+import urllib.request
+import wget, patoolib
+
+class Config:
+    TYPE_FLOAT = np.float32
+    BASE_DIR = '../../data'
+    WORKING_DIR = BASE_DIR + '/dat'
+    TEMP_DIR = BASE_DIR + '/tmp'
+    PREVIEW_DIR = BASE_DIR + '/preview'
 
 class ConvKernels:
     identity = np.array([[ 0.0, 0.0, 0.0],
@@ -44,176 +55,226 @@ class ConvKernels:
                         [ -2.0, -8.0,-12.0, -8.0, -2.0],
                         [ -1.0, -4.0, -6.0, -4.0, -1.0]])
 
-def convert_dtype(source_array, outpath, dtype):
-    cast_ = np.memmap(outpath, dtype=dtype, mode='w+', shape=source_array.shape)
-    cast_[:] = source_array.astype(dtype=dtype)
-    cast_.flush()
-    return cast_
+class DiskMap(np.memmap):
+    def __new__(cls, filename, dtype, mode, shape):
+        return np.memmap.__new__(cls, filename=filename, dtype=dtype, mode=mode, shape=shape)
 
-def save_preview(path, source_array, transform=None, target_shape=[4000, 4000]):
-    if transform is not None:
-        lt = latlon_to_pixel(transform, (121., 25.))
-        rb = latlon_to_pixel(transform, (122., 24.))
-        print('pixels', transform, lt, rb)
-        roi = [min(lt[0], rb[0]), min(lt[1], rb[1]), max(lt[0], rb[0]), max(lt[1], rb[1])]
-        print(roi)
-        width = roi[2] - roi[0]        
-        height = roi[3] - roi[1]        
+    def __init__(self, filename, dtype, mode, shape):
+        self.path = filename
+        self.dir, self.filename = path.split(filename)
+        print('numpy.memmap opened at {}'.format(filename))
 
-        resize = np.array(source_array[roi[1]:roi[1]+height, roi[0]:roi[0]+width]).astype(dtype=np.float)
+    def unmap(self):
+        self._mmap.close()
+        return self.path
 
-        # Save preview PNG
-        preview = (normalize(resize)*255.).astype(np.uint8)
-        imsave(path, exposure.rescale_intensity(preview))
-        print('Preview saved', path, target_shape)
+    @staticmethod
+    def remove_file(dmap_obj):
+        dpath = dmap_obj.unmap()
+        del dmap_obj
+        print('removing', dpath)
+        os.remove(dpath)
+        print('numpy.memmap {} removed from disk'.format(dpath))
 
-    else:
-        # Calculate fixed-aspect resizing for preview
-        height, width, *_ = source_array.shape
+    def get_writable_temp(self):
+        tmppath = path.join(Config.TEMP_DIR, str(uuid.uuid4()))
+        copy = DiskMap(tmppath, dtype=self.dtype, mode='w+', shape=self.shape)
+        copy[:] = self[:]
+        return copy
 
-        resize_rate = min(target_shape[0]/height, target_shape[1]/width)
-        target_shape = (np.array([height, width], dtype=np.float)*resize_rate).astype(dtype=np.int)
+    def copy_normalize(self, signed=False):
+        tmppath = path.join(Config.TEMP_DIR, str(uuid.uuid4()))
+        copy = DiskMap(tmppath, dtype=Config.TYPE_FLOAT, mode='w+', shape=self.shape)
+        copy[:] = self[:]
+        normalize(copy, signed)
+        return copy
 
-        resize = np.memmap(os.path.join(gettempdir(), 'resizing.dat'), dtype=source_array.dtype, mode='w+', shape=source_array.shape)
-        resize[:] = source_array
-        resize = imresize(resize, target_shape)
+    def copy_astype(self, dtype, outpath=''):
+        if outpath=='':
+            outpath = path.join(Config.TEMP_DIR, str(uuid.uuid4()))
+        copy = DiskMap(outpath, dtype=dtype, mode='w+', shape=self.shape)
+        copy[:] = self.astype(dtype=dtype)[:]
+        return copy
 
-        # Save preview PNG
-        preview = (normalize(resize)*255.).astype(np.uint8)
-        imsave(path, exposure.rescale_intensity(preview))
-        print('Preview saved', path, target_shape)
+    def slice_save_preview(self, outpath, roi):
+        roi = [min(roi[0], roi[2]), min(roi[1], roi[3]), max(roi[0], roi[2]), max(roi[1], roi[3])]
+        w_ = roi[2] - roi[0]
+        h_ = roi[3] - roi[1]
+        sliced = np.array(self[roi[1]:roi[1]+h_, roi[0]:roi[0]+w_]).astype(dtype=Config.TYPE_FLOAT)
+        normalized = (normalize(sliced)*255.).astype(np.uint8)
+        imsave(outpath, exposure.rescale_intensity(normalized))
+        print('Sliced preview saved', outpath, roi)
 
-        del resize
+    def resize_save_preview(self, outpath, target_shape=[4000, 4000]):
+        h_, w_, *_ = self.shape
+        rrate_ = min(target_shape[0]/h_, target_shape[1]/w_)
+        target_shape = (np.array([h_, w_], dtype=Config.TYPE_FLOAT)*rrate_).astype(dtype=np.int)
 
-def process_save(source_array, kernel, source, prefix, band, transform):
-    try:
-        fn_full = prefix + '.dat'
-        fn_small = prefix + ''
+        tmppath = path.join(Config.TEMP_DIR, str(uuid.uuid4()))
+        resized = DiskMap(tmppath, dtype=self.dtype, mode='w+', shape=self.shape)
+        resized[:] = self[:]
+        resized = imresize(resized, target_shape)
+        normalized = (normalize(resized)*255.).astype(np.uint8)
+        imsave(outpath, exposure.rescale_intensity(normalized))
+        print('Resized preview saved', outpath, target_shape)
 
+        DiskMap.remove_file(resized)
+
+    def save_8bit(self, outpath, signed=False, pre_normalized=False):
+        if pre_normalized:
+            if signed:
+                cast = self.copy_astype(np.int8, outpath)
+            else:
+                cast = self.copy_astype(np.uint8, outpath)
+        else:
+            normalized_ = self.copy_normalize(signed)
+            if signed:
+                normalized_ *= 127
+                cast = normalized_.copy_astype(np.int8, outpath)
+            else:
+                normalized_ *= 255
+                cast = normalized_.copy_astype(np.uint8, outpath)
+            DiskMap.remove_file(normalized_)
+        return cast
+
+class DigitalElevationModel:
+    def __init__(self, inpath):
+        print('Opening DEM object...', inpath)
+        self.dir, self.filename = path.split(inpath)
+        root, ext = path.splitext(self.filename)
+        self.raster_path = path.join(self.dir, root + '.npy')
+        self.dem = gdal.Open(inpath)
+        self.xsize = self.dem.RasterXSize
+        self.ysize = self.dem.RasterYSize
+        self.shape = (self.ysize, self.xsize)
+        self.bands = self.dem.RasterCount
+        self.projection = self.dem.GetProjection()
+        self.transform = self.dem.GetGeoTransform()
+        self.raster = None
+        print('DEM object opened, ({}, {}, {}), transformation: {}'.format(self.xsize, self.ysize, self.bands, self.transform))
+        if self.bands > 1: print('The DEM has more than 1 band and this script will process only the first one')
+
+    def pixel_to_latlon(self, pixel):
+        x_ = self.transform[0]
+        y_ = self.transform[3]
+        pixel_width = self.transform[1]
+        pixel_height = self.transform[5]
+        return (x_ + pixel[0]*pixel_width, y_ + pixel[1]*pixel_height)
+
+    def latlon_to_pixel(self, latlon):
+        x_ = self.transform[0]
+        y_ = self.transform[3]
+        pixel_width = self.transform[1]
+        pixel_height = self.transform[5]
+        return (round((latlon[0]-x_)/pixel_width), round((latlon[1]-y_)/pixel_height))
+
+    def get_raster_create(self):
+        if self.raster is None:
+            if path.isfile(self.raster_path):
+                self.raster = DiskMap(self.raster_path, dtype=Config.TYPE_FLOAT, mode='r', shape=self.shape)
+            else:
+                self.raster = DiskMap(self.raster_path, dtype=Config.TYPE_FLOAT, mode='w+', shape=self.shape)
+                self.raster[:] = self.dem.GetRasterBand(1).ReadAsArray()
+        print('Raster loaded', np.amin(self.raster), np.amax(self.raster))
+        return self.raster
+
+class MapsCreator:
+    def __init__(self, source_url):
+        if not path.isdir(Config.BASE_DIR): makedirs(Config.BASE_DIR)
+        if not path.isdir(Config.WORKING_DIR): makedirs(Config.WORKING_DIR)
+        if not path.isdir(Config.TEMP_DIR): makedirs(Config.TEMP_DIR)
+        if not path.isdir(Config.PREVIEW_DIR): makedirs(Config.PREVIEW_DIR)
+
+        self.source_dem = path.join(Config.BASE_DIR, './tif file/twdtm_asterV2_30m.tif')
+        # Donwload from source URL if DEM is not found
+        if not path.isfile(self.source_dem):
+            print('Download and extract DEM...', source_url)
+            zpath = wget.download(source_url, out=Config.BASE_DIR)
+            patoolib.extract_archive(zpath, outdir=Config.BASE_DIR)
+
+        self.dem = DigitalElevationModel(self.source_dem)
+        self.raster = self.dem.get_raster_create()
+
+    def set_preview_roi(self, lt, rb):
+        lt = self.dem.latlon_to_pixel((121., 25.))
+        rb = self.dem.latlon_to_pixel((122., 24.))
+        self.preview_roi = [lt[0], lt[1], rb[0], rb[1]]
+
+    def copy_convolve(self, kernel, prefix, gaussian=True):
         # Convolve
-        tf_shape = (1,) + source_array.shape + (1,)
-        print('Convolving...', source_array.shape, tf_shape)
-        convolved = np.memmap(fn_full, dtype=np.float, mode='w+', shape=source_array.shape)
-        kernel_combined = signal.convolve2d(kernel, ConvKernels.gaussian, mode='full')
-        convolved[:] = signal.convolve2d(source_array, kernel_combined, mode='same')
-        convolved.flush()
-        print('Convolved data saved', fn_full, sys.getsizeof(convolved))
+        outpath = path.join(Config.WORKING_DIR, prefix+'.npy')
+        print('Convolving...', self.raster.shape)
+        convolved = DiskMap(outpath, dtype=Config.TYPE_FLOAT, mode='w+', shape=self.raster.shape)
 
-        fn_preview = prefix + '.png'
-        save_preview(fn_preview, convolved, transform)
+        kernel_combined = kernel
+        if gaussian:
+            kernel_combined = signal.convolve2d(kernel, ConvKernels.gaussian, mode='full')
 
-        del convolved
+        convolved[:] = signal.convolve2d(self.raster, kernel_combined, mode='same')
+        print('Convolution done')
 
-    except:
-        raise
+        return convolved
 
-print(gettempdir())
+    def save_8bit_n_preview(self, source, prefix, signed=False, pre_normalized=False):
+        npypath = path.join(Config.WORKING_DIR, prefix + '.npy')
+        cast_ = source.save_8bit(npypath, signed, pre_normalized)
+        cast_.slice_save_preview(path.join(Config.PREVIEW_DIR, prefix + '.png'), self.preview_roi)
+        del cast_
 
-working_dir = '../../data'
-source = os.path.join(working_dir, './tif file/twdtm_asterV2_30m.tif')
-print(source)
-padding = 5
+    def prepare_maps(self):
+        # Normalize elevation, convert to uint8, save preview
+        self.save_8bit_n_preview(self.raster, 'dem8')
 
-dem = gdal.Open(source)
-xsize = dem.RasterXSize
-ysize = dem.RasterYSize
-bands = dem.RasterCount
-print('DEM opened', xsize, ysize, bands)
+        # Prepare prominence maps
+        prominence = self.copy_convolve(ConvKernels.prom5, 'prominence')
+        self.save_8bit_n_preview(prominence, 'prominence8', signed=True)
+        del prominence
 
-def pixel_to_latlon(transform, pixel):
-    x_origin = transform[0]
-    y_origin = transform[3]
-    pixel_width = transform[1]
-    pixel_height = transform[5]
-    return (x_origin + pixel[0]*pixel_width, y_origin + pixel[1]*pixel_height)
+        # Prepare sobel gradient maps
+        sobelv = self.copy_convolve(ConvKernels.sobelv5, 'sobelv')
+        sobelh = self.copy_convolve(ConvKernels.sobelh5, 'sobelh')
 
-def latlon_to_pixel(transform, latlon):
-    x_origin = transform[0]
-    y_origin = transform[3]
-    pixel_width = transform[1]
-    pixel_height = transform[5]
-    return (round((latlon[0]-x_origin)/pixel_width), round((latlon[1]-y_origin)/pixel_height))
+        # Use vertical and horizontal gradient maps to create slope map (vector length of sobel gradients)
+        sobelv_ = sobelv.get_writable_temp()
+        sobelh_ = sobelh.get_writable_temp()
+        print('sobelv loaded', np.amin(sobelv_), np.amax(sobelh_))
+        print('sobelh loaded', np.amin(sobelh_), np.amax(sobelh_))
+        sobelv_ *= sobelv_
+        sobelh_ *= sobelh_
+        print('sobelv squared', np.amin(sobelv_), np.amax(sobelh_))
+        print('sobelh squared', np.amin(sobelh_), np.amax(sobelh_))
+        vlen = DiskMap(path.join(Config.WORKING_DIR, 'vlen.npy'), dtype=Config.TYPE_FLOAT, mode='w+', shape=sobelv.shape)
+        vlen[:] = sobelv_[:]
+        vlen += sobelh_
+        print('sobel added', np.amin(vlen), np.amax(vlen))
+        np.sqrt(vlen, vlen)
+        DiskMap.remove_file(sobelv_)
+        DiskMap.remove_file(sobelh_)
 
-projection = dem.GetProjection()
-print('projection', projection)
-transform = dem.GetGeoTransform()
-lt = pixel_to_latlon(transform, (0, 0))
-rb = pixel_to_latlon(transform, (xsize, ysize))
-print('latlon', transform, lt, rb)
-lt = latlon_to_pixel(transform, lt)
-rb = latlon_to_pixel(transform, rb)
-print('pixels', transform, lt, rb)
+        # Normalize vectors (keep only gradient direction and discard length information)
+        vlen[vlen==0] = 1.
+        sobelv /= vlen
+        sobelh /= vlen
+        sobelv *= 127
+        sobelh *= 127
 
-print()
-# Process only first band
-i = 1
-print('Processing band {} of {}'.format(i, bands))
-band_i = dem.GetRasterBand(i)
+        self.save_8bit_n_preview(vlen, 'vlen8')
+        self.save_8bit_n_preview(sobelv, 'sobelv8', signed=True, pre_normalized=True)
+        self.save_8bit_n_preview(sobelh, 'sobelh8', signed=True, pre_normalized=True)
 
-raster = np.memmap(os.path.join(working_dir, 'dem-f64.dat'), dtype=np.float, mode='w+', shape=(ysize, xsize))
-raster[:] = band_i.ReadAsArray()
-print('Raster loaded', ysize, xsize, sys.getsizeof(raster))
+        del vlen
+        del sobelv
+        del sobelh
 
-process_save(raster, ConvKernels.prom5, source, os.path.join(working_dir, 'prom-f64'), i, dem.GetGeoTransform())
-process_save(raster, ConvKernels.sobelv5, source, os.path.join(working_dir, 'sobelv-f64'), i, dem.GetGeoTransform())
-process_save(raster, ConvKernels.sobelh5, source, os.path.join(working_dir, 'sobelh-f64'), i, dem.GetGeoTransform())
+if __name__ == "__main__":
+    print()
+    print('Load DEM and preparing maps...')
 
-# Normalize elevation, convert to int8, save preview
-raster[:] = normalize(raster)
-raster *= 255
-dem_s = convert_dtype(raster, os.path.join(working_dir, 'dem.dat'), np.uint8)
-fn_preview = os.path.join(working_dir, 'dem.png')
-save_preview(fn_preview, dem_s, dem.GetGeoTransform())
-del dem_s
-del raster
+    source = 'http://gis.rchss.sinica.edu.tw/gps/wp-content/uploads/2012/02/20120201_twdtm_asterV2_30m.rar'
+    mc = MapsCreator(source)
+    mc.set_preview_roi((121., 25.), (122., 24.))
+    mc.prepare_maps()
+    del mc
 
-# Prepare vector length map and normalize sobel
-sobelv = np.memmap(os.path.join(working_dir, 'sobelv-f64.dat'), dtype=np.float, mode='r+', shape=(ysize, xsize))
-sobelh = np.memmap(os.path.join(working_dir, 'sobelh-f64.dat'), dtype=np.float, mode='r+', shape=(ysize, xsize))
-
-d_map = np.memmap(os.path.join(working_dir, 'vlen-f64.dat'), dtype=np.float, mode='w+', shape=sobelv.shape)
-d_map[:] = np.sqrt(sobelv*sobelv + sobelh*sobelh)
-
-# Normalize vectors (keep direction and discard length)
-d_map[d_map==0] = 1.
-sobelv /= d_map
-sobelh /= d_map
-
-# Normalize slope, convert to int8, save preview
-d_map[:] = normalize(d_map)
-d_map *= 255
-d_map_s = convert_dtype(d_map, os.path.join(working_dir, 'vlen.dat'), np.uint8)
-fn_preview = os.path.join(working_dir, 'vlen.png')
-save_preview(fn_preview, d_map_s, dem.GetGeoTransform())
-del d_map
-del d_map_s
-
-# Convert to int8
-sobelv *= 127
-sobelv_s = convert_dtype(sobelv, os.path.join(working_dir, 'sobelv.dat'), np.int8)
-sobelh *= 127
-sobelh_s = convert_dtype(sobelh, os.path.join(working_dir, 'sobelh.dat'), np.int8)
-
-# Save for preview
-fn_preview = os.path.join(working_dir, 'sobelv.png')
-save_preview(fn_preview, sobelv_s, dem.GetGeoTransform())
-fn_preview = os.path.join(working_dir, 'sobelh.png')
-save_preview(fn_preview, sobelh_s, dem.GetGeoTransform())
-del sobelv
-del sobelh
-del sobelv_s
-del sobelh_s
-
-# Normalize prominence, convert to int8, save preview
-prom = np.memmap(os.path.join(working_dir, 'prom-f64.dat'), dtype=np.float, mode='r+', shape=(ysize, xsize))
-prom[:] = normalize_symm(prom)
-prom *= 127
-prom_s = convert_dtype(prom, os.path.join(working_dir, 'prom.dat'), np.int8)
-fn_preview = os.path.join(working_dir, 'prom.png')
-save_preview(fn_preview, prom_s, dem.GetGeoTransform())
-del prom
-del prom_s
-
-dem = None
-
-print()
+    print('All tasks done')
+    print()

@@ -1,25 +1,17 @@
 import numpy as np
 
-def normalize(arr):
-    print('normalize', arr.dtype)
+def normalize(arr, signed=False):
+    #hist, bin_edges = np.histogram(arr, 16)
+    #print('Normalization...', signed, arr.dtype, arr.shape, hist, bin_edges)
     min_ = np.amin(arr)
     max_ = np.amax(arr)
 
-    #hist, bin_edges = np.histogram(arr, 64)
-    #print('hist', hist, bin_edges)
+    if signed:
+        max_ = max(-min_, max_)
+        min_ = -max_
 
+    print('Normalization... signed: {}, dtype: {}, shape: {}, min/max: ({}, {})'.format(signed, arr.dtype, arr.shape, min_, max_))
+        
     arr -= min_
     arr /= (max_ - min_)
-    print(min_, max_, np.amin(arr), np.amax(arr))
-    return arr
-
-def normalize_symm(arr):
-    print('symmetrical normalize', arr.dtype)
-    min_ = np.amin(arr)
-    max_ = np.amax(arr)
-    max_ = max(-min_, max_)
-    min_ = -max_
-    arr -= min_
-    arr /= (max_ - min_)
-    print(min_, max_, np.amin(arr), np.amax(arr))
     return arr
