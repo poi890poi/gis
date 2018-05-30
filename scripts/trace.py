@@ -50,7 +50,7 @@ modulus = 2 ** 64
 t_init = time()
 t = 0
 t_save = 0
-iterations = length // 4
+iterations = length // 2
 for i in range(iterations):
 
     # Debug information
@@ -61,13 +61,21 @@ for i in range(iterations):
         percent = i*10000//iterations/100
         print('Pixels {} of {}, {}%, elapsed: {}, ete: {}'.format(i, iterations, percent, format_time(elapsed), ete))
         t = time()
-    if time() - t_save > 600:
+    if time() - t_save > 300:
         rgb_map = np.ndarray(roi_shape, dtype=np.uint8)
         trace = trace_map.slice_normalize(dem.preview_roi)
         rgb_map[:, :, 0] = trace
         rgb_map[:, :, 1] = background
+        rgb_map[:, :, 2] = trace
+        imsave(path.join(Config.PREVIEW_DIR, 'trace.png'), rgb_map)
+        # Save footprints
+        rgb_map = np.ndarray(roi_shape, dtype=np.uint8)
+        trace[trace>=1] = 255
+        rgb_map[:, :, 0] = trace
+        rgb_map[:, :, 1] = background
+        rgb_map[:, :, 2] = trace
+        imsave(path.join(Config.PREVIEW_DIR, 'footprints.png'), rgb_map)
         print('Snapshot for preview', rgb_map.shape)
-        imsave(path.join(Config.PREVIEW_DIR, 'trace.png'), rgb_map)    
         del trace
         t_save = time()
 
@@ -105,7 +113,7 @@ for i in range(iterations):
             # Trace climber
             if py < 0 or py >= height or px < 0 or px >= width:
                 break
-            if trace_map[py, px] >= 64:
+            if trace_map[py, px] >= 255:
                 pass
             elif py != y_ or px != x_:
                 # Don't plot same pixel twice
