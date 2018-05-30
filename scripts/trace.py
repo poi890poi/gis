@@ -19,7 +19,7 @@ print(dem, dem.shape, dem.preview_roi)
 # Load vertical and horizontal gradient maps
 sobelv = DiskMap(path.join(Config.WORKING_DIR, 'sobelv8.npy'), dtype=np.int8, mode='r', shape=dem.shape)
 sobelh = DiskMap(path.join(Config.WORKING_DIR, 'sobelh8.npy'), dtype=np.int8, mode='r', shape=dem.shape)
-elevation = DiskMap(path.join(Config.WORKING_DIR, 'dem8.npy'), dtype=np.uint8, mode='r', shape=dem.shape)
+elevation = DiskMap(path.join(Config.WORKING_DIR, 'elevation.npy'), dtype=np.uint16, mode='r', shape=dem.shape)
 background = sobelh.slice_normalize(dem.preview_roi)
 
 #hist, bin_edges = np.histogram(elevation, 64)
@@ -64,15 +64,19 @@ for i in range(iterations):
     if time() - t_save > 300:
         rgb_map = np.ndarray(roi_shape, dtype=np.uint8)
         trace = trace_map.slice_normalize(dem.preview_roi)
+        bg_ = np.array(background)
+        bg_[trace>=128] = 128
         rgb_map[:, :, 0] = trace
-        rgb_map[:, :, 1] = background
+        rgb_map[:, :, 1] = bg_
         rgb_map[:, :, 2] = trace
         imsave(path.join(Config.PREVIEW_DIR, 'trace.png'), rgb_map)
         # Save footprints
         rgb_map = np.ndarray(roi_shape, dtype=np.uint8)
         trace[trace>=1] = 255
+        bg_ = np.array(background)
+        bg_[trace>=1] = 0
         rgb_map[:, :, 0] = trace
-        rgb_map[:, :, 1] = background
+        rgb_map[:, :, 1] = bg_
         rgb_map[:, :, 2] = trace
         imsave(path.join(Config.PREVIEW_DIR, 'footprints.png'), rgb_map)
         print('Snapshot for preview', rgb_map.shape)
@@ -82,7 +86,7 @@ for i in range(iterations):
     # Initial point of a climber
     py, px = index_to_yx(seed, height, width)
     
-    if elevation[py, px] < 8:
+    if elevation[py, px] < 80:
         # Skip initial points on sea or plain
         pass
 
@@ -93,7 +97,7 @@ for i in range(iterations):
         # Last position of climber
         y_ = -1
         x_ = -1
-        for s in range(128):
+        for s in range(256):
             # Move climber
             my += sobelv[py, px]
             mx += sobelh[py, px]
